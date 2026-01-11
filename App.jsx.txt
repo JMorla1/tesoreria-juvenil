@@ -1,0 +1,580 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, onAuthStateChanged } from 'firebase/auth';
+import { getFirestore, collection, doc, onSnapshot, setDoc, addDoc, deleteDoc, query } from 'firebase/firestore';
+import { 
+  Wallet, PieChart, User, PlusCircle, MinusCircle, Trash2, 
+  ChevronRight, Calendar, CheckCircle2, FileText, X, Settings, 
+  Share2, Loader2, Info, ArrowLeft, Download, Send, AlertCircle
+} from 'lucide-react';
+
+// ======================================================
+// 1. CONFIGURACIÓN E INFRAESTRUCTURA FIREBASE (v75.0)
+// ======================================================
+const firebaseConfig = JSON.parse(__firebase_config);
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'tesoreria-pro-final';
+
+const CONFIG = {
+  categories: {
+    in: ['Ofrenda', 'Talento (Comida)', 'Talento (Venta)', 'Donación', 'Fondo de Proyecto', 'Otros'],
+    out: ['Libros/Material', 'Ayuda Social', 'Movilización', 'Convención', 'Servicios', 'Otros']
+  },
+  months: ['Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio', 'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre'],
+  years: ['2025', '2026', '2027'],
+  colors: ['#6366f1', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899']
+};
+
+// ======================================================
+// 2. COMPONENTES VISUALES BLINDADOS
+// ======================================================
+
+const SafeDonut = ({ data = {}, total = 0, title = "" }) => {
+  const entries = useMemo(() => 
+    Object.entries(data).filter(([_, v]) => typeof v === 'number' && v > 0), 
+  [data]);
+
+  let currentOffset = 0;
+
+  if (total <= 0 || entries.length === 0) {
+    return (
+      <div className="bg-white p-10 rounded-[2.5rem] border-2 border-dashed border-slate-100 text-center flex flex-col items-center justify-center min-h-[220px]">
+        <PieChart className="w-10 h-10 text-slate-100 mb-2" />
+        <p className="text-[10px] font-black uppercase text-slate-300 tracking-widest">{title}</p>
+        <p className="text-[9px] text-slate-400 italic">Esperando registros...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm flex flex-col items-center animate-in zoom-in-95">
+      <h4 className="text-[9px] font-black text-slate-400 uppercase tracking-widest mb-6">{title}</h4>
+      <div className="relative w-28 h-28 mb-6">
+        <svg viewBox="0 0 32 32" className="w-full h-full -rotate-90">
+          <circle cx="16" cy="16" r="14" fill="transparent" stroke="#f8fafc" strokeWidth="4" />
+          {entries.map(([cat, val], i) => {
+            const percentage = (val / total) * 100;
+            const dash = `${percentage} 100`;
+            const offset = -currentOffset;
+            currentOffset += percentage;
+            return (
+              <circle key={cat} cx="16" cy="16" r="14" fill="transparent" stroke={CONFIG.colors[i % CONFIG.colors.length]} strokeWidth="4.5" strokeDasharray={dash} strokeDashoffset={offset} strokeLinecap="round" />
+            );
+          })}
+        </svg>
+        <div className="absolute inset-0 flex flex-col items-center justify-center leading-none">
+          <span className="text-[10px] font-black text-slate-800">${total.toFixed(0)}</span>
+        </div>
+      </div>
+      <div className="w-full space-y-1.5 px-1 text-left">
+        {entries.map(([cat, val], i) => (
+          <div key={cat} className="flex justify-between items-center text-[8px] font-bold uppercase truncate">
+            <div className="flex items-center gap-1.5 truncate max-w-[70%]">
+              <div className="w-1.5 h-1.5 rounded-full flex-shrink-0" style={{backgroundColor: CONFIG.colors[i % CONFIG.colors.length]}}></div>
+              <span className="text-slate-500 truncate">{String(cat)}</span>
+            </div>
+            <span className="text-slate-900 font-black">${Number(val).toFixed(2)}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+const OfficialReport = ({ church, stats, fundBalances, projects, projectContributions }) => {
+  const safeStats = stats || { in: 0, out: 0, bal: 0, byIn: {}, byOut: {} };
+  const safeContributions = projectContributions || {};
+  const totalReserved = Object.values(safeContributions).reduce((a, b) => (a || 0) + (b || 0), 0);
+  const freeBalance = (safeStats.bal || 0) - totalReserved;
+
+  return (
+    <div className="bg-white border-2 border-slate-900 p-8 sm:p-14 space-y-12 font-sans text-slate-900 text-left shadow-none animate-in fade-in" id="report-view">
+      <div className="text-center border-b-4 border-slate-900 pb-10 flex flex-col items-center">
+        <div className="bg-indigo-600 p-4 rounded-2xl mb-4 shadow-lg"><Wallet className="text-white" size={24} /></div>
+        <h1 className="text-3xl font-black uppercase tracking-tight text-slate-900 leading-none">{String(church || "App Tesorería")}</h1>
+        <h3 className="text-lg font-black uppercase tracking-[0.2em] bg-slate-100 py-3 w-full border-y-2 border-slate-900 text-center mt-6">Estado de Situación y Flujo</h3>
+        <p className="text-[10px] font-bold text-slate-400 uppercase mt-4 italic">Periodo de Gestión: {new Date().toLocaleDateString()}</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+        <section className="space-y-4">
+          <h4 className="text-xs font-black uppercase border-b-2 border-slate-900 pb-1 flex items-center gap-2 italic text-slate-800">I. Activos (Caja)</h4>
+          <table className="w-full text-[10px]">
+            <tbody>
+              {Object.entries(fundBalances || {}).filter(([_, b]) => b > 0).map(([n, b]) => (
+                <tr key={n} className="border-b border-slate-100"><td className="py-2 uppercase text-slate-600 font-medium">{String(n)}</td><td className="py-2 text-right font-black text-slate-900">${Number(b).toFixed(2)}</td></tr>
+              ))}
+              <tr className="bg-slate-900 text-white font-black"><td className="p-3 uppercase leading-none text-[9px]">Total en Caja</td><td className="p-3 text-right text-xs">${Number(safeStats.bal || 0).toFixed(2)}</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section className="space-y-4">
+          <h4 className="text-xs font-black uppercase border-b-2 border-slate-900 pb-1 flex items-center gap-2 italic text-slate-800">II. Patrimonio (Metas)</h4>
+          <table className="w-full text-[10px]">
+            <tbody>
+              {(projects || []).map(p => (
+                <tr key={p.id} className="border-b border-slate-100"><td className="py-2 uppercase text-slate-600 font-medium">Reserva: {String(p.name)}</td><td className="py-2 text-right font-black text-indigo-600">${Number(safeContributions[p.id] || 0).toFixed(2)}</td></tr>
+              ))}
+              <tr className="border-b border-slate-100 bg-emerald-50/50 text-emerald-900 font-black"><td className="py-2 uppercase italic text-[9px]">Saldo de Uso Libre</td><td className="py-2 text-right text-xs">${Math.max(freeBalance, 0).toFixed(2)}</td></tr>
+              <tr className="bg-slate-200 font-black border-t-2 border-slate-900"><td className="p-3 uppercase text-[9px]">Total Patrimonio</td><td className="p-3 text-right text-xs">${Number(safeStats.bal || 0).toFixed(2)}</td></tr>
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <section className="space-y-6 pt-6 border-t-4 border-slate-100 text-left">
+        <h4 className="text-xs font-black uppercase border-b-2 border-slate-900 pb-1 italic text-indigo-600">III. Ejecución de Resultados</h4>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-10">
+          <div className="space-y-2 text-left">
+            <p className="text-[9px] font-black text-emerald-600 uppercase border-l-2 border-emerald-500 pl-2">Ingresos Consolidados</p>
+            {Object.entries(safeStats.byIn || {}).map(([c, v]) => v > 0 && (
+              <div key={c} className="flex justify-between text-[9px] uppercase border-b border-slate-50 pb-1"><span>{String(c)}</span><span className="font-bold text-emerald-600">+${Number(v).toFixed(2)}</span></div>
+            ))}
+          </div>
+          <div className="space-y-2 text-left">
+            <p className="text-[9px] font-black text-rose-600 uppercase border-l-2 border-rose-500 pl-2">Gastos Consolidados</p>
+            {Object.entries(safeStats.byOut || {}).map(([c, v]) => v > 0 && (
+              <div key={c} className="flex justify-between text-[9px] uppercase border-b border-slate-50 pb-1"><span>{String(c)}</span><span className="font-bold text-rose-600">-${Number(v).toFixed(2)}</span></div>
+            ))}
+          </div>
+        </div>
+      </section>
+    </div>
+  );
+};
+
+// ======================================================
+// 4. APLICACIÓN PRINCIPAL (CÓDIGO AUDITADO v75.0)
+// ======================================================
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('inicio');
+  const [isPaperMode, setIsPaperMode] = useState(false);
+  const [showAdd, setShowAdd] = useState(false);
+  const [showFilter, setShowFilter] = useState(false);
+  const [showProfile, setShowProfile] = useState(false); 
+  const [loading, setLoading] = useState(true);
+  
+  // Estados de Detalle Blindados
+  const [activeProjectDetail, setActiveProjectDetail] = useState(null); 
+  const [activeFundDetail, setActiveFundDetail] = useState(null); 
+  
+  const [msgAlert, setMsgAlert] = useState("");
+  const [confirmDel, setConfirmDel] = useState(null);
+
+  // Estados Base Sincronizados
+  const [church, setChurch] = useState("");
+  const [userEmail, setUserEmail] = useState("");
+  const [projects, setProjects] = useState([]);
+  const [txs, setTxs] = useState([]);
+
+  // Filtros
+  const [selectedMonths, setSelectedMonths] = useState(['Todos']); 
+  const [selectedYear, setSelectedYear] = useState('2026');
+
+  const [form, setForm] = useState({ 
+    desc: '', monto: '', tipo: 'in', cat: 'Ofrenda', 
+    projectId: '', isProjectAssign: false, fundSource: 'Ofrenda', 
+    resp: '', fecha: new Date().toISOString().split('T')[0] 
+  });
+
+  // --- NUBE: FIREBASE ---
+  useEffect(() => {
+    const init = async () => {
+      try {
+        await signInAnonymously(auth);
+      } catch (err) { console.error("Firebase Falló", err); }
+    };
+    init();
+    return onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (u) setLoading(false);
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!user) return;
+    const unsubProfile = onSnapshot(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'main'), (s) => {
+      if (s.exists()) { setChurch(s.data().church || ""); setUserEmail(s.data().email || ""); }
+    });
+    const unsubProj = onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'projects'), (s) => {
+      setProjects(s.docs.map(d => ({ id: d.id, ...d.data() })));
+    });
+    const unsubTxs = onSnapshot(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), (s) => {
+      const list = s.docs.map(d => ({ id: d.id, ...d.data() }));
+      setTxs(list.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0)));
+    });
+    return () => { unsubProfile(); unsubProj(); unsubTxs(); };
+  }, [user]);
+
+  // --- MOTOR DE CÁLCULO ---
+  const calculated = useMemo(() => {
+    const s = { in: 0, out: 0, bal: 0, byIn: {}, byOut: {} };
+    const fundBalances = {};
+    const projSums = {};
+    
+    (projects || []).forEach(p => { if(p.id) projSums[p.id] = 0; });
+    CONFIG.categories.in.forEach(c => fundBalances[c] = 0);
+    CONFIG.categories.out.forEach(c => s.byOut[c] = 0);
+
+    txs.forEach(t => {
+      const val = parseFloat(t.monto) || 0;
+      const d = new Date(t.fecha);
+      if (isNaN(d.getTime())) return;
+      
+      const mName = CONFIG.months[d.getMonth()];
+      const yName = d.getFullYear().toString();
+      const isVisible = (selectedMonths.includes('Todos') || selectedMonths.includes(mName)) && (selectedYear === yName);
+
+      if (isVisible) {
+        if (t.tipo === 'in') {
+          s.in += val; s.bal += val;
+          s.byIn[t.cat] = (s.byIn[t.cat] || 0) + val;
+          fundBalances[t.cat] = (fundBalances[t.cat] || 0) + val;
+          if (t.projectId && projSums[t.projectId] !== undefined) projSums[t.projectId] += val;
+        } else {
+          s.out += val; s.bal -= val;
+          s.byOut[t.cat] = (s.byOut[t.cat] || 0) + val;
+          const src = t.fundSource || 'Ofrenda';
+          fundBalances[src] = (fundBalances[src] || 0) - val;
+          if (t.projectId && projSums[t.projectId] !== undefined) projSums[t.projectId] -= val;
+        }
+      }
+    });
+    return { stats: s, fundBalances, projectContributions: projSums };
+  }, [txs, projects, selectedMonths, selectedYear]);
+
+  // Acciones
+  const handleSave = async (e) => {
+    e.preventDefault();
+    if (!user) return;
+    const finalData = { 
+      ...form, 
+      monto: parseFloat(form.monto) || 0, 
+      projectId: form.isProjectAssign ? form.projectId : '', 
+      createdAt: Date.now() 
+    };
+    await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'transactions'), finalData);
+    setShowAdd(false);
+    setMsgAlert("✅ Sincronizado");
+    setForm({ ...form, desc: '', monto: '', isProjectAssign: false });
+    setTimeout(() => setMsgAlert(""), 3000);
+  };
+
+  const syncProfile = async () => {
+    if (!user) return;
+    await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'profile', 'main'), { church, email: userEmail });
+    setMsgAlert("✅ Identidad Guardada");
+    setShowProfile(false);
+    setTimeout(() => setMsgAlert(""), 3000);
+  };
+
+  const handleWhatsApp = () => {
+    const text = `📊 *REPORTE FINANCIERO: ${church.toUpperCase()}*\n💰 SALDO DISPONIBLE: $${calculated.stats.bal.toFixed(2)}\n📉 GASTOS PERIODO: $${calculated.stats.out.toFixed(2)}\n━━━━━━━━━━━━━━━━━━\n✅ _Generado en Gestor Pro v75.0_`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
+  };
+
+  const safeSpending = Math.max((calculated.stats.bal - Object.values(calculated.projectContributions).reduce((a,b)=>(a||0)+(b||0),0)) * 0.8, 0);
+
+  if (loading) return <div className="min-h-screen bg-slate-900 flex flex-col items-center justify-center text-white"><Loader2 className="w-12 h-12 animate-spin text-indigo-500 mb-4" /><p className="text-[10px] font-black uppercase tracking-widest animate-pulse">Conectando con la Bóveda...</p></div>;
+
+  if (isPaperMode) {
+    return (
+      <div className="min-h-screen bg-slate-100 overflow-y-auto">
+        <div className="no-print bg-slate-900 p-6 flex justify-between items-center text-white sticky top-0 z-[1000]">
+          <span className="text-[10px] font-black uppercase tracking-widest">Reporte Auditoría</span>
+          <button onClick={() => setIsPaperMode(false)} className="bg-indigo-600 px-6 py-2 rounded-full font-black text-[10px] uppercase shadow-lg">Regresar</button>
+        </div>
+        <div className="max-w-4xl mx-auto py-10 px-4 text-left">
+          <OfficialReport church={church} stats={calculated.stats} fundBalances={calculated.fundBalances} projects={projects} projectContributions={calculated.projectContributions} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-[#F8FAFC] font-sans pb-36 text-slate-900 overflow-x-hidden selection:bg-indigo-100 text-left leading-tight">
+      
+      {/* MODAL CONFIGURACIÓN PERFIL */}
+      {showProfile && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[4000] flex items-center justify-center p-6 animate-in fade-in">
+           <div className="bg-white w-full max-w-sm rounded-[3rem] p-10 shadow-2xl space-y-8 relative text-left">
+              <button onClick={() => setShowProfile(false)} className="absolute top-8 right-8 text-slate-300 active:scale-75 transition-all"><X size={24} /></button>
+              <div className="flex flex-col items-center text-center space-y-2">
+                 <div className="w-16 h-16 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center shadow-inner"><Settings size={32} /></div>
+                 <h3 className="text-lg font-black uppercase tracking-tight">Perfil del Ministerio</h3>
+                 <p className="text-[9px] text-slate-400 uppercase tracking-widest leading-none">Guardado seguro en la nube</p>
+              </div>
+              <div className="space-y-4">
+                 <div className="space-y-1 text-left"><label className="text-[8px] font-black text-slate-400 uppercase ml-2 text-left">Nombre Iglesia</label><input type="text" className="w-full bg-slate-50 p-5 rounded-2xl border-none outline-none font-bold text-xs shadow-inner" value={church} onChange={e=>setChurch(e.target.value)} /></div>
+                 <div className="space-y-1 text-left"><label className="text-[8px] font-black text-slate-400 uppercase ml-2 text-left">Correo de Identidad</label><input type="email" className="w-full bg-slate-50 p-5 rounded-2xl border-none outline-none font-bold text-xs shadow-inner" placeholder="ejemplo@iglesia.com" value={userEmail} onChange={e=>setUserEmail(e.target.value)} /></div>
+                 <button onClick={syncProfile} className="w-full py-5 bg-indigo-600 text-white rounded-2xl font-black text-[10px] uppercase shadow-lg shadow-indigo-100 tracking-widest active:scale-95 transition-all">Sincronizar Datos</button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {/* MODAL ELIMINAR */}
+      {confirmDel && (
+        <div className="fixed inset-0 bg-slate-900/90 backdrop-blur-md z-[5000] flex items-center justify-center p-6 animate-in fade-in">
+           <div className="bg-white w-full max-w-xs rounded-[3rem] p-10 shadow-2xl text-center space-y-6">
+              <div className="w-20 h-20 bg-rose-50 text-rose-500 rounded-full flex items-center justify-center mx-auto shadow-inner leading-none text-center"><Trash2 size={32} /></div>
+              <h4 className="text-sm font-black uppercase leading-tight text-center">¿Eliminar registro?</h4>
+              <div className="flex gap-3 text-center">
+                 <button onClick={()=>setConfirmDel(null)} className="flex-1 py-4 rounded-2xl bg-slate-100 text-slate-500 font-black text-[10px] uppercase text-center leading-none">No</button>
+                 <button onClick={async () => {
+                    const col = confirmDel.type === 'tx' ? 'transactions' : 'projects';
+                    await deleteDoc(doc(db, 'artifacts', appId, 'users', user.uid, col, confirmDel.id));
+                    setConfirmDel(null); setMsgAlert("🗑️ Eliminado");
+                 }} className="flex-1 py-4 rounded-2xl bg-rose-500 text-white font-black text-[10px] uppercase shadow-lg text-center leading-none">Sí, borrar</button>
+              </div>
+           </div>
+        </div>
+      )}
+
+      {msgAlert && (
+        <div className="fixed top-6 left-1/2 -translate-x-1/2 z-[1000] animate-in slide-in-from-top duration-300">
+           <div className="bg-slate-900 text-white px-8 py-4 rounded-full shadow-2xl font-black text-[10px] uppercase border border-indigo-500/30 flex items-center gap-3 leading-none shadow-indigo-500/20">
+              <CheckCircle2 size={16} className="text-emerald-400" /> {msgAlert}
+           </div>
+        </div>
+      )}
+
+      {/* HEADER DINÁMICO */}
+      <header className="bg-slate-900 text-white pt-16 pb-28 px-8 rounded-b-[4.5rem] shadow-2xl relative text-center no-print overflow-hidden border-b-8 border-indigo-600 text-center">
+        <div className="absolute top-0 right-0 w-80 h-80 bg-indigo-500/10 rounded-full -mr-32 -mt-32 blur-3xl"></div>
+        <button onClick={() => setShowProfile(true)} className="absolute top-10 right-10 w-12 h-12 bg-white/10 rounded-2xl flex items-center justify-center text-white border border-white/10 active:scale-75 transition-all shadow-lg leading-none text-center"><Settings size={20} /></button>
+        <div className="relative z-10 text-center">
+          <p className="text-[10px] font-black opacity-30 uppercase tracking-[0.4em] mb-3 italic leading-none text-center">{church || "Tesoreria App"}</p>
+          <h2 className="text-6xl font-black tracking-tighter leading-none mb-10 text-white text-center">${calculated.stats.bal.toLocaleString(undefined, { minimumFractionDigits: 2 })}</h2>
+          <div className="flex justify-center gap-3 text-center">
+             <button onClick={() => setShowFilter(true)} className="bg-white/10 px-8 py-3.5 rounded-full text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all text-white border border-white/10 flex items-center gap-2 shadow-lg leading-none text-center"><Calendar size={14} /> Filtro</button>
+             <button onClick={() => setMsgAlert("Caja Cuadrada ✓")} className="bg-emerald-600 px-8 py-3.5 rounded-full text-[10px] font-black uppercase tracking-widest active:scale-95 transition-all text-white shadow-lg border border-white/20 text-center leading-none shadow-emerald-500/20">Conciliar</button>
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-xl mx-auto p-6 -mt-16 relative z-20 text-left space-y-8">
+        
+        {/* VISTA DETALLE (LIBRO AUXILIAR) */}
+        {(activeProjectDetail || activeFundDetail) && (
+           <div className="space-y-6 animate-in slide-in-from-right duration-500 pb-10 text-left">
+              <div className="flex items-center gap-4 mb-4 text-left">
+                 <button onClick={() => {setActiveProjectDetail(null); setActiveFundDetail(null);}} className="w-12 h-12 bg-white rounded-2xl shadow-sm border border-slate-100 flex items-center justify-center text-slate-400 active:scale-90 shadow-indigo-100/50 leading-none text-center"><ArrowLeft size={20} /></button>
+                 <div className="text-left leading-tight"><h3 className="text-xl font-black text-slate-800 uppercase leading-none truncate max-w-[200px] text-left">{activeProjectDetail ? projects.find(p=>p.id===activeProjectDetail)?.name : activeFundDetail}</h3><p className="text-[10px] font-bold text-indigo-500 uppercase tracking-widest mt-1 italic leading-none text-left text-left">Libro Auxiliar Cronológico</p></div>
+              </div>
+              <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-sm space-y-2 relative overflow-hidden text-left"><p className="text-[9px] font-black text-slate-400 uppercase tracking-widest leading-none text-left">Saldo Neto Acumulado</p><p className="text-4xl font-black text-indigo-600 tracking-tighter text-left">${activeProjectDetail ? (calculated.projectContributions[activeProjectDetail] || 0).toFixed(2) : (calculated.fundBalances[activeFundDetail] || 0).toFixed(2)}</p></div>
+              <div className="space-y-4 text-left">
+                 <div className="bg-white rounded-[3rem] border border-slate-100 shadow-sm overflow-hidden divide-y divide-slate-50 text-left">
+                    {txs.filter(t => activeProjectDetail ? t.projectId === activeProjectDetail : (t.cat === activeFundDetail || t.fundSource === activeFundDetail)).length === 0 ? (
+                       <p className="p-10 text-center text-[10px] text-slate-300 uppercase italic leading-loose text-center font-bold">Sin movimientos en este rubro.</p>
+                    ) : (
+                       txs.filter(t => activeProjectDetail ? t.projectId === activeProjectDetail : (t.cat === activeFundDetail || t.fundSource === activeFundDetail)).map((r) => (
+                        <div key={r.id} className="p-5 flex justify-between items-center active:bg-slate-50 transition-all border-l-4 text-left shadow-sm" style={{borderLeftColor: r.tipo === 'in' ? '#10B981' : '#ef4444'}}>
+                           <div className="flex gap-4 items-center text-left">
+                              <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-[8px] flex-shrink-0 ${r.tipo === 'in' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'} text-center leading-none`}>{r.tipo === 'in' ? 'IN' : 'EG'}</div>
+                              <div className="text-left leading-none"><h4 className="text-xs font-bold text-slate-800 leading-tight mb-0.5 truncate text-left">{String(r.desc)}</h4><p className="text-[7px] font-black text-slate-400 uppercase text-left">{String(r.fecha)}</p></div>
+                           </div>
+                           <span className={`text-sm font-black flex-shrink-0 ml-4 ${r.tipo === 'in' ? 'text-emerald-600' : 'text-rose-600'} text-right`}>${(r.monto || 0).toFixed(2)}</span>
+                        </div>
+                       ))
+                    )}
+                 </div>
+              </div>
+           </div>
+        )}
+
+        {/* BÓVEDA PRINCIPAL */}
+        {!activeProjectDetail && !activeFundDetail && activeTab === 'inicio' && (
+          <div className="space-y-8 animate-in fade-in no-print pb-10 text-left">
+            <div className="bg-indigo-900 text-white p-6 rounded-[2.5rem] shadow-xl border border-indigo-700/50 flex items-center gap-5 relative overflow-hidden group text-left">
+               <div className="w-14 h-14 bg-indigo-50 rounded-2xl flex items-center justify-center shadow-lg animate-pulse flex-shrink-0 leading-none text-center"><Wallet size={28} /></div>
+               <div className="relative z-10 text-left leading-tight"><h4 className="text-[9px] font-black uppercase tracking-[0.2em] text-indigo-300 mb-1.5 leading-none text-left">Capacidad de Gasto Seguro</h4><p className="text-2xl font-black tracking-tighter text-left">${safeSpending.toFixed(2)}</p><p className="text-[8px] text-indigo-300/60 mt-1 italic uppercase font-bold tracking-tighter leading-none text-left text-left text-left">Dinero libre protegiendo ahorros.</p></div>
+            </div>
+
+            <div className="space-y-3 text-left">
+               <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 italic leading-none text-left">Disponibilidad Física (Toque detalle)</h4>
+               <div className="flex overflow-x-auto gap-3 pb-2 no-scrollbar px-1 text-left leading-none">
+                  {Object.entries(calculated.fundBalances).filter(([_, b]) => b > 0).map(([name, bal]) => (
+                    <button key={name} onClick={() => setActiveFundDetail(name)} className="bg-white p-5 rounded-[2rem] border border-slate-100 shadow-sm flex flex-col min-w-[140px] text-left active:scale-95 transition-all shadow-indigo-100/10 leading-none text-left">
+                       <span className="text-[8px] font-black text-slate-400 uppercase tracking-tighter mb-1 truncate text-left">{String(name)}</span>
+                       <span className="font-black text-sm text-slate-800 text-left">${Number(bal).toFixed(2)}</span>
+                    </button>
+                  ))}
+               </div>
+            </div>
+
+            <div className="space-y-3 text-left">
+               <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 italic leading-none text-left text-left">Proyectos en Curso</h4>
+               <div className="grid grid-cols-1 gap-4 text-left leading-none">
+                  {projects.map(p => {
+                    const saved = calculated.projectContributions[p.id] || 0;
+                    const pct = p.target > 0 ? Math.floor((saved/p.target)*100) : 0;
+                    return (
+                      <button key={p.id} onClick={() => setActiveProjectDetail(p.id)} className="bg-white p-6 rounded-[2.5rem] border border-slate-100 shadow-sm space-y-4 group active:scale-95 transition-all text-left relative overflow-hidden shadow-indigo-100/50 text-left leading-none">
+                        <div className="flex justify-between items-start relative z-10 text-left leading-none"><h5 className="text-sm font-black text-slate-800 uppercase tracking-tight truncate max-w-[200px] leading-none text-left">{String(p.name)}</h5><div className="w-6 h-6 rounded-full bg-indigo-50 flex items-center justify-center text-indigo-400 text-center leading-none"><ChevronRight size={14} /></div></div>
+                        <div className="flex justify-between text-[11px] font-black leading-none uppercase relative z-10 text-left leading-none"><span className="text-slate-500 tracking-tighter text-left leading-none">${Number(saved).toFixed(0)} <span className="text-slate-300 text-left">/ ${p.target}</span></span><span className="text-indigo-600 font-black text-right leading-none">{pct}%</span></div>
+                        <div className="w-full bg-slate-50 h-3 rounded-full overflow-hidden border border-slate-100 p-0.5 relative z-10 text-left leading-none"><div className="h-full rounded-full transition-all duration-1000 bg-indigo-500 text-left shadow-sm shadow-indigo-500/30" style={{width: `${Math.min(pct, 100)}%`}}></div></div>
+                      </button>
+                    );
+                  })}
+               </div>
+            </div>
+
+            <div className="flex gap-4 text-center leading-none">
+              <button onClick={() => { setForm({...form, tipo: 'in', cat: 'Ofrenda', isProjectAssign: false}); setShowAdd(true); }} className="flex-1 bg-white p-8 rounded-[3rem] shadow-sm border border-slate-100 flex flex-col items-center gap-1 active:scale-95 transition-all shadow-indigo-100/30 leading-none text-center"><PlusCircle size={24} className="text-emerald-500 mb-1 leading-none text-center" /><span className="text-[10px] font-black uppercase text-slate-500 leading-none text-center">Ingreso</span></button>
+              <button onClick={() => { setForm({...form, tipo: 'out', fundSource: 'Ofrenda', isProjectAssign: false}); setShowAdd(true); }} className="flex-1 bg-white p-8 rounded-[3rem] shadow-sm border border-slate-100 flex flex-col items-center gap-1 active:scale-95 transition-all shadow-rose-100/30 leading-none text-center"><MinusCircle size={24} className="text-rose-500 mb-1 leading-none text-center" /><span className="text-[10px] font-black uppercase text-slate-500 leading-none font-black text-rose-600 text-center">Gasto</span></button>
+            </div>
+
+            <div className="space-y-4 text-left leading-none">
+              <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest ml-4 italic leading-none text-left text-left">Historial Sincronizado</h4>
+              <div className="bg-white rounded-[3rem] border border-slate-100 shadow-sm overflow-hidden divide-y divide-slate-50 max-h-[450px] overflow-y-auto no-scrollbar text-left leading-none shadow-sm">
+                {txs.filter(t => (selectedMonths.includes('Todos') || selectedMonths.includes(CONFIG.months[new Date(t.fecha).getMonth()])) && new Date(t.fecha).getFullYear().toString() === selectedYear).map((r, idx) => (
+                  <div key={r.id} className="p-5 flex justify-between items-center active:bg-slate-50 transition-all border-l-4 text-left leading-none shadow-sm" style={{borderLeftColor: r.tipo === 'in' ? '#10B981' : '#ef4444'}}>
+                    <div className="flex gap-4 items-center">
+                       <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-black text-[8px] flex-shrink-0 ${r.tipo === 'in' ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'} text-center leading-none shadow-sm`}>#{String(txs.length - idx).padStart(3, '0')}</div>
+                       <div className="truncate text-left leading-none text-left"><h4 className="text-xs font-bold text-slate-800 leading-tight mb-1 truncate text-left">{String(r.desc)}</h4><p className="text-[7px] font-black text-slate-400 uppercase leading-none text-left">{String(r.fecha)} • {r.projectId ? `META` : String(r.cat)}</p></div>
+                    </div>
+                    <div className="text-right flex flex-col items-end flex-shrink-0 ml-4 leading-none text-right">
+                       <span className={`text-sm font-black mb-1 ${r.tipo === 'in' ? 'text-emerald-600' : 'text-rose-600'} text-right leading-none`}>${Number(r.monto || 0).toFixed(2)}</span>
+                       <button onClick={() => setConfirmDel({...r, type: 'tx'})} className="text-[7px] font-black uppercase text-slate-200 hover:text-rose-500 text-right leading-none">Borrar</button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* TAB 2: ANÁLISIS */}
+        {activeTab === 'grafico' && (
+          <div className="space-y-8 animate-in slide-in-from-right pb-20 no-print text-center text-left leading-none">
+             <div className="bg-white p-8 rounded-[3rem] border border-slate-100 shadow-sm space-y-6 text-center shadow-indigo-100/50 leading-none">
+                <h4 className="text-[10px] font-black text-slate-400 uppercase tracking-widest italic leading-none text-center">Eficiencia Operativa</h4>
+                <div className="flex items-center gap-6 text-center text-left leading-none">
+                   <div className="flex-1 text-center space-y-2 leading-none text-center"><p className="text-[9px] font-black text-emerald-500 uppercase leading-none text-center">Ingresado</p><p className="text-2xl font-black text-slate-800 tracking-tighter text-center leading-none text-center">${calculated.stats.in.toFixed(0)}</p></div>
+                   <div className="flex-1 text-center space-y-2 leading-none text-center"><p className="text-[9px] font-black text-rose-500 uppercase leading-none text-center">Gastado</p><p className="text-2xl font-black text-slate-800 tracking-tighter text-center leading-none text-center">${calculated.stats.out.toFixed(0)}</p></div>
+                </div>
+                <div className="w-full bg-slate-50 h-3 rounded-full overflow-hidden border border-slate-100 p-0.5 flex text-left leading-none">
+                    <div className="h-full bg-emerald-500 rounded-l-full shadow-lg" style={{ width: `${(calculated.stats.in / (calculated.stats.in + calculated.stats.out || 1)) * 100}%` }}></div>
+                    <div className="h-full bg-rose-500 rounded-r-full shadow-lg" style={{ width: `${(calculated.stats.out / (calculated.stats.in + calculated.stats.out || 1)) * 100}%` }}></div>
+                </div>
+             </div>
+             <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 text-left leading-none">
+                <SafeDonut data={calculated.stats.byIn} total={calculated.stats.in} title="Fuentes de Ingreso" />
+                <SafeDonut data={calculated.stats.byOut} total={calculated.stats.out} title="Destinos de Gasto" />
+             </div>
+          </div>
+        )}
+
+        {/* TAB 3: INFORME */}
+        {activeTab === 'reporte' && (
+           <div className="space-y-8 animate-in slide-in-from-right no-print pb-20 text-left leading-none text-left">
+              <div className="bg-slate-900 text-white p-10 rounded-[4rem] shadow-2xl border-b-8 border-indigo-600 text-center space-y-6 text-center leading-none text-center">
+                <h4 className="text-[11px] font-black uppercase tracking-[0.3em] text-indigo-400 text-center leading-none text-center">Auditoría Ministerial</h4>
+                <div className="grid grid-cols-1 gap-4 leading-none text-center leading-none text-center">
+                   <button onClick={() => setIsPaperMode(true)} className="w-full bg-indigo-600 p-6 rounded-[2.5rem] text-xs font-black uppercase shadow-2xl flex items-center justify-center gap-3 active:scale-95 shadow-indigo-500/50 text-center leading-none text-center shadow-lg"><FileText size={20} /> Ver Balance PDF</button>
+                   <button onClick={handleWhatsApp} className="w-full bg-[#25D366] p-6 rounded-[2.5rem] text-xs font-black uppercase text-white shadow-xl flex items-center justify-center gap-3 active:scale-95 transition-all text-center leading-none text-center shadow-lg"><Share2 size={20} /> Enviar a WhatsApp</button>
+                </div>
+              </div>
+
+              <div className="space-y-4 text-left leading-none text-left">
+                 <h4 className="text-[11px] font-black text-indigo-700 uppercase tracking-widest ml-4 italic border-b border-indigo-100 pb-2 flex items-center gap-2 text-left leading-none text-left"><Info size={14} /> Gestión de Proyectos</h4>
+                 {(projects || []).map((p, idx) => ( 
+                    <div key={p.id} className="grid grid-cols-2 gap-3 bg-indigo-50/50 p-4 rounded-2xl relative shadow-sm border border-indigo-100 text-left leading-none text-left"> 
+                      <input type="text" className="bg-white p-3 rounded-xl border-none outline-none text-[10px] font-black uppercase text-left leading-none text-left" value={String(p.name)} onChange={async (e) => { 
+                         const newP = [...projects]; newP[idx].name = e.target.value; setProjects(newP); 
+                         await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', p.id), newP[idx]); 
+                      }} /> 
+                      <input type="number" className="bg-white p-3 rounded-xl border-none outline-none text-[10px] font-black text-left leading-none text-left" value={Number(p.target)} onChange={async (e) => { 
+                         const newP = [...projects]; newP[idx].target = parseInt(e.target.value) || 0; setProjects(newP); 
+                         await setDoc(doc(db, 'artifacts', appId, 'users', user.uid, 'projects', p.id), newP[idx]); 
+                      }} /> 
+                    </div> 
+                 ))}
+                 <button onClick={async () => { await addDoc(collection(db, 'artifacts', appId, 'users', user.uid, 'projects'), { name: 'NUEVA META', target: 100 }); }} className="w-full py-4 bg-indigo-100 text-indigo-600 rounded-3xl font-black text-[9px] uppercase tracking-widest active:scale-95 leading-none text-center leading-none text-center">+ Añadir Proyecto</button>
+              </div>
+
+              <div className="space-y-4 text-center leading-none text-center">
+                <h4 className="text-[11px] font-black text-slate-400 uppercase tracking-widest text-center italic leading-none underline decoration-indigo-300 text-center leading-none text-center">Vista Documental Real</h4>
+                <div className="transform scale-[0.98] origin-top rounded-[4rem] overflow-hidden border-4 border-white shadow-2xl bg-white transition-all hover:scale-100 text-left leading-none text-left text-left">
+                   <OfficialReport church={church} stats={calculated.stats} fundBalances={calculated.fundBalances} projects={projects} projectContributions={calculated.projectContributions} />
+                </div>
+              </div>
+           </div>
+        )}
+      </main>
+
+      {/* MENÚ NAVEGACIÓN INFERIOR */}
+      <nav className="fixed bottom-10 left-8 right-8 bg-white/95 backdrop-blur-2xl border border-slate-200 p-6 flex justify-between items-center z-[100] shadow-2xl rounded-[3rem] text-slate-300 no-print text-center leading-none text-center">
+        <button onClick={() => {setActiveTab('inicio'); setActiveProjectDetail(null); setActiveFundDetail(null);}} className={`flex flex-col items-center gap-2 transition-all ${activeTab === 'inicio' ? 'text-indigo-600 scale-125 font-bold' : 'opacity-60'} text-center leading-none text-center`}>
+          <Wallet size={26} strokeWidth={2.5} /> <span className="text-[9px] font-black uppercase leading-none text-center">Bóveda</span>
+        </button>
+        <button onClick={() => setActiveTab('grafico')} className={`flex flex-col items-center gap-2 transition-all ${activeTab === 'grafico' ? 'text-indigo-600 scale-125 font-bold' : 'opacity-60'} text-center leading-none text-center`}>
+          <PieChart size={26} strokeWidth={2.5} /> <span className="text-[9px] font-black uppercase text-center leading-none text-center text-center">Análisis</span>
+        </button>
+        <button onClick={() => setActiveTab('reporte')} className={`flex flex-col items-center gap-2 transition-all ${activeTab === 'reporte' ? 'text-indigo-600 scale-125 font-bold' : 'opacity-60'} text-center leading-none text-center`}>
+          <FileText size={26} strokeWidth={2.5} /> <span className="text-[9px] font-black uppercase text-center leading-none text-center text-center">Informe</span>
+        </button>
+      </nav>
+
+      {/* MODAL FILTRO PERIODO */}
+      {showFilter && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[500] flex items-center justify-center p-6 no-print animate-in fade-in leading-none text-left text-left">
+          <div className="bg-white w-full max-w-sm rounded-[4rem] p-10 shadow-2xl max-h-[85vh] flex flex-col relative border border-white/20 text-left leading-none text-left">
+             <div className="flex justify-between items-center mb-8 border-b pb-4 text-left leading-none text-left text-left"><h3 className="font-black uppercase text-xs tracking-widest text-indigo-600 italic text-left leading-none text-left">Rango Fiscal</h3><button onClick={() => setShowFilter(false)} className="bg-slate-100 p-2 rounded-full text-slate-400 active:scale-75 text-center leading-none text-center leading-none"><X size={18} /></button></div>
+             <div className="space-y-6 flex-1 overflow-y-auto pr-2 custom-scrollbar text-left leading-none text-left text-left text-left text-left">
+                <div className="text-left leading-none text-left leading-none"><h5 className="text-[10px] font-black uppercase text-slate-400 mb-3 ml-2 text-left leading-none text-left text-left">Año Fiscal</h5><div className="flex gap-2 text-left leading-none text-left text-left leading-none">{CONFIG.years.map(y => (<button key={y} onClick={() => setSelectedYear(y)} className={`flex-1 py-3 rounded-xl text-[10px] font-black uppercase border-2 transition-all ${selectedYear === y ? 'border-indigo-600 bg-indigo-50 text-indigo-700 shadow-sm' : 'border-slate-50 bg-slate-50 text-slate-400'} text-center leading-none text-center`}>{String(y)}</button>))}</div></div>
+                <div className="pt-4 border-t border-slate-50 text-left leading-none text-left text-left leading-none"><h5 className="text-[10px] font-black uppercase text-slate-400 mb-3 ml-2 text-left leading-none text-left text-left leading-none">Meses del Periodo</h5><button onClick={() => setSelectedMonths(['Todos'])} className={`w-full p-6 rounded-3xl flex items-center justify-between border-2 mb-3 transition-all ${selectedMonths.includes('Todos') ? 'bg-indigo-600 text-white border-indigo-600 shadow-2xl' : 'bg-slate-50 text-slate-400 border-transparent'} text-center leading-none text-center`}><span className="font-black uppercase text-[10px] text-center leading-none">Todo el Año</span></button>{CONFIG.months.map(m => (<button key={m} onClick={() => {let list = selectedMonths.filter(x => x !== 'Todos'); if (list.includes(m)) list = list.filter(x => x !== m); else list.push(m); setSelectedMonths(list.length === 0 ? ['Todos'] : list); }} className={`w-full p-4 rounded-[1.5rem] mb-2 flex items-center justify-between border-2 transition-all ${selectedMonths.includes(m) ? 'border-indigo-600 bg-indigo-50/50 text-indigo-700 shadow-sm' : 'border-slate-50 bg-white text-slate-400'} text-left leading-none text-left`}><span className="font-bold text-[11px] uppercase tracking-widest text-left leading-none text-left leading-none">{String(m)}</span>{selectedMonths.includes(m) && <CheckCircle2 size={14} className="text-indigo-600 text-center leading-none text-center" />}</button>))}</div>
+             </div>
+             <button onClick={() => setShowFilter(false)} className="mt-6 w-full py-6 bg-indigo-600 text-white rounded-3xl font-black uppercase text-[10px] shadow-2xl active:scale-95 transition-all text-center leading-none text-center">Aplicar Filtros</button>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL REGISTRO */}
+      {showAdd && (
+        <div className="fixed inset-0 bg-slate-900/95 backdrop-blur-md z-[500] flex items-end sm:items-center justify-center p-6 animate-in slide-in-from-bottom duration-500 text-left leading-none text-left text-left text-left">
+          <div className="bg-white w-full max-w-md rounded-[4.5rem] p-10 shadow-2xl border border-white/10 shadow-slate-900 text-left leading-none text-left text-left text-left">
+            <div className="flex justify-between items-center mb-10 text-[10px] font-black uppercase text-slate-300 tracking-[0.3em] italic text-left leading-none text-left text-left">Registrar Movimiento<button onClick={() => setShowAdd(false)} className="text-xl active:scale-90 p-2 font-black text-slate-300 leading-none text-center leading-none">✕</button></div>
+            <form onSubmit={handleSave} className="space-y-8 leading-none text-left text-left leading-none text-left">
+              <div className="grid grid-cols-2 bg-slate-50 p-2 rounded-[2.5rem] border border-slate-100 shadow-inner text-center leading-none text-center">
+                <button type="button" onClick={() => setForm({...form, tipo: 'in', cat: 'Ofrenda'})} className={`py-4 rounded-[2rem] font-black text-[11px] uppercase transition-all duration-300 ${form.tipo === 'in' ? 'bg-white text-emerald-600 shadow-xl' : 'text-slate-400'} text-center leading-none text-center`}>INGRESO</button>
+                <button type="button" onClick={() => setForm({...form, tipo: 'out', fundSource: 'Ofrenda'})} className={`py-4 rounded-[2rem] font-black text-[11px] uppercase transition-all duration-300 ${form.tipo === 'out' ? 'bg-white text-rose-600 shadow-xl' : 'text-slate-400'} text-center leading-none text-center`}>GASTO</button>
+              </div>
+
+              <div className="space-y-4 text-left leading-none text-left text-left leading-none text-left text-left">
+                <input type="text" placeholder="Concepto..." className="w-full bg-slate-50 p-6 rounded-[2.5rem] border-none font-bold text-xs shadow-inner outline-none text-slate-800 placeholder:text-slate-300 text-left leading-none text-left text-left" value={form.desc} onChange={e => setForm({...form, desc: e.target.value})} required />
+                <div className="grid grid-cols-2 gap-4 text-left leading-none text-left leading-none text-left">
+                  <input type="number" step="0.01" placeholder="Monto ($)" className="w-full bg-slate-50 p-6 rounded-[2.5rem] border-none font-bold text-xs shadow-inner outline-none text-slate-800 placeholder:text-slate-300 text-left leading-none text-left text-left" value={form.monto} onChange={e => setForm({...form, monto: e.target.value})} required />
+                  {form.tipo === 'in' ? (
+                    <select className="w-full bg-slate-50 p-6 rounded-[2.5rem] border-none font-bold text-[10px] shadow-inner outline-none text-slate-600 uppercase appearance-none text-center leading-none text-center text-center" value={form.cat} onChange={e => setForm({...form, cat: e.target.value})}>
+                      {CONFIG.categories.in.map(c => <option key={c} value={c}>{c}</option>)}
+                    </select>
+                  ) : (
+                    <select className="w-full bg-indigo-50 p-6 rounded-[2.5rem] border-none font-bold text-[10px] shadow-inner outline-none text-indigo-600 uppercase appearance-none text-center border-2 border-indigo-200 leading-none text-center text-center" value={form.fundSource} onChange={e => setForm({...form, fundSource: e.target.value})}>
+                      {CONFIG.categories.in.map(c => <option key={c} value={c}>Desde: {c}</option>)}
+                    </select>
+                  )}
+                </div>
+                <div className="space-y-4 text-center leading-none text-center leading-none text-center">
+                   <button type="button" onClick={() => setForm({...form, isProjectAssign: !form.isProjectAssign, projectId: projects[0]?.id || ''})} className={`w-full py-4 rounded-2xl border-2 transition-all font-black text-[10px] uppercase flex items-center justify-center gap-2 ${form.isProjectAssign ? 'bg-indigo-600 text-white border-indigo-600 shadow-lg shadow-indigo-500/30' : 'bg-white text-indigo-600 border-indigo-100'} text-center leading-none text-center`}>
+                     {form.isProjectAssign ? "Meta Asignada ✓" : "¿Asignar a un Proyecto?"}
+                   </button>
+                   {form.isProjectAssign && projects.length > 0 && (
+                      <div className="animate-in slide-in-from-top px-2 text-left leading-none text-left leading-none text-left"><select className="w-full bg-slate-900 p-5 rounded-[2.5rem] border-none font-bold text-xs shadow-xl outline-none text-white uppercase appearance-none text-center shadow-indigo-100 text-center leading-none text-center text-center" value={form.projectId} onChange={e => setForm({...form, projectId: e.target.value})} required>{projects.map(p => <option key={p.id} value={p.id}>{String(p.name)}</option>)}</select></div>
+                   )}
+                </div>
+                <input type="date" className="w-full bg-slate-50 p-6 rounded-[2.5rem] border-none font-bold text-xs shadow-inner outline-none text-slate-600 text-left leading-none text-left text-left" value={form.fecha} onChange={e => setForm({...form, fecha: e.target.value})} required />
+              </div>
+              <button type="submit" className={`w-full py-7 rounded-[3rem] text-white font-black uppercase text-xs tracking-widest mt-6 shadow-2xl transition-all active:scale-95 ${form.tipo === 'in' ? 'bg-emerald-500 shadow-emerald-500/30' : 'bg-rose-500 shadow-rose-500/30'} text-center leading-none text-center text-center`}>CONFIRMAR REGISTRO</button>
+            </form>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
